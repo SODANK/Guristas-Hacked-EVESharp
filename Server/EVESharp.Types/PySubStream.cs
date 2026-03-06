@@ -14,31 +14,20 @@ public class PySubStream : PyDataType
     public PyDataType Stream
     {
         get
-{
-    if (!this.mIsUnmarshaled)
-    {
-        try
         {
-            this.mOriginalStream = this.mCurrentStream =
-                Unmarshal.ReadFromByteArray(this.mByteStream);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine("[PySubStream] Unmarshal failed, substituting PyNone: " + ex);
-            this.mOriginalStream = this.mCurrentStream = new PyNone();
-        }
-    }
+            if (!this.mIsUnmarshaled)
+            {
+                this.mOriginalStream = this.mCurrentStream =
+                    Unmarshal.ReadFromByteArray(this.mByteStream);
+            }
 
-    return this.mCurrentStream;
-}
-
+            return this.mCurrentStream;
+        }
     }
 
     public byte[] ByteStream
-{
-    get
     {
-        try
+        get
         {
             if (this.mByteStream != null &&
                 (this.mIsUnmarshaled == false || this.mCurrentStream == this.mOriginalStream))
@@ -47,13 +36,7 @@ public class PySubStream : PyDataType
             this.mOriginalStream = this.mCurrentStream;
             return this.mByteStream = Marshal.ToByteArray(this.mCurrentStream);
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine("[PySubStream] ByteStream generation FAILED, substituting empty stream: " + ex);
-            return Array.Empty<byte>();
-        }
     }
-}
 
 
     public PySubStream (byte [] from)

@@ -110,7 +110,10 @@ public class TransportManager : ITransportManager
         MachoClientTransport newTransport = new MachoClientTransport (transport);
 
         if (ClientTransports.Remove (newTransport.Session.UserID, out MachoClientTransport original))
+        {
+            TransportList.Remove (original);
             original.Close ();
+        }
 
         this.PrepareTransport (newTransport);
         

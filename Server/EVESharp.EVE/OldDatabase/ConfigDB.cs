@@ -59,8 +59,10 @@ public class ConfigDB : DatabaseAccessor
     /// <returns></returns>
     public PyDataType GetMultiLocationsEx (PyList <PyInteger> ids)
     {
+        string idList = PyString.Join (',', ids);
+
         DbDataReader reader = this.Database.Select (
-            $"SELECT itemID as locationID, itemName as locationName, x, y, z FROM invItems LEFT JOIN eveNames USING(itemID) LEFT JOIN invPositions USING (itemID) WHERE itemID IN ({PyString.Join (',', ids)})"
+            $"SELECT t.itemID as locationID, COALESCE(en.itemName, md.itemName) as locationName, COALESCE(ip.x, md.x) as x, COALESCE(ip.y, md.y) as y, COALESCE(ip.z, md.z) as z FROM (SELECT itemID FROM invItems WHERE itemID IN ({idList}) UNION SELECT itemID FROM mapDenormalize WHERE itemID IN ({idList})) t LEFT JOIN eveNames en ON en.itemID = t.itemID LEFT JOIN invPositions ip ON ip.itemID = t.itemID LEFT JOIN mapDenormalize md ON md.itemID = t.itemID"
         );
 
         using (reader)

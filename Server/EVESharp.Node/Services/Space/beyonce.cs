@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
+using EVESharp.Database;
+using EVESharp.Database.Inventory;
 using EVESharp.Database.Inventory.Groups;
 using EVESharp.Database.Types;
 using EVESharp.Destiny;
@@ -43,12 +46,14 @@ namespace EVESharp.Node.Services.Space
         private INotificationSender        NotificationSender        { get; }
         private SolarSystemDestinyManager  SolarSystemDestinyMgr     { get; }
         private ISessionManager            SessionManager            { get; }
+        private IDatabase                  Database                  { get; }
         private ILogger                    Log                       { get; }
 
         private Ballpark        mBallpark;
         private DestinyManager  mDestinyManager;
         private int             mSolarSystemID;
         private int             mOwnerID;
+        private Dictionary<int, List<(int GateID, int SolarSystemID)>> mStargateJumps = new();
 
         // =====================================================================
         //  GLOBAL / UNBOUND CONSTRUCTOR
@@ -56,13 +61,14 @@ namespace EVESharp.Node.Services.Space
         // =====================================================================
 
         public beyonce(IBoundServiceManager manager, IItems items, INotificationSender notificationSender,
-                       SolarSystemDestinyManager solarSystemDestinyMgr, ISessionManager sessionManager, ILogger logger)
+                       SolarSystemDestinyManager solarSystemDestinyMgr, ISessionManager sessionManager, IDatabase database, ILogger logger)
             : base(manager)
         {
             this.Items                 = items;
             this.NotificationSender    = notificationSender;
             this.SolarSystemDestinyMgr = solarSystemDestinyMgr;
             this.SessionManager        = sessionManager;
+            this.Database              = database;
             this.Log                   = logger;
         }
 
@@ -79,6 +85,7 @@ namespace EVESharp.Node.Services.Space
             INotificationSender        notificationSender,
             SolarSystemDestinyManager  solarSystemDestinyMgr,
             ISessionManager            sessionManager,
+            IDatabase                  database,
             ILogger                    logger)
             : base(manager, session, objectID)
         {
@@ -86,6 +93,7 @@ namespace EVESharp.Node.Services.Space
             this.NotificationSender    = notificationSender;
             this.SolarSystemDestinyMgr = solarSystemDestinyMgr;
             this.SessionManager        = sessionManager;
+            this.Database              = database;
             this.Log                   = logger;
             this.mSolarSystemID        = objectID;
             this.mOwnerID              = session.CharacterID;
@@ -178,7 +186,7 @@ namespace EVESharp.Node.Services.Space
         {
             Log.Information("[beyonce] CreateBoundInstance: objectID={ObjectID}, char={CharID}", bindParams.ObjectID, call.Session.CharacterID);
             return new beyonce(BoundServiceManager, call.Session, bindParams.ObjectID,
-                               this.Items, this.NotificationSender, this.SolarSystemDestinyMgr, this.SessionManager, this.Log);
+                               this.Items, this.NotificationSender, this.SolarSystemDestinyMgr, this.SessionManager, this.Database, this.Log);
         }
 
         // =====================================================================
@@ -353,6 +361,32 @@ namespace EVESharp.Node.Services.Space
             // Unregister ship from DestinyManager
             mDestinyManager?.UnregisterEntity(shipID);
 
+            // Move ship to the new station in DB (same pattern as /move GM command)
+            if (shipID != 0 && Items.TryGetItem(shipID, out ItemEntity shipEntity))
+            {
+                shipEntity.LocationID = targetStation;
+                shipEntity.Flag = Flags.Hangar;
+                shipEntity.Persist();
+                Log.Information("[beyonce] Dock: Moved ship {ShipID} to station {StationID} in DB", shipID, targetStation);
+            }
+
+            // Update character location in chrInformation for login persistence
+            Database.Prepare(
+                "UPDATE chrInformation " +
+                "SET stationID = @stationID, solarSystemID = @solarSystemID, " +
+                "    constellationID = @constellationID, regionID = @regionID " +
+                "WHERE characterID = @characterID",
+                new Dictionary<string, object>
+                {
+                    {"@characterID", charID},
+                    {"@stationID", targetStation},
+                    {"@solarSystemID", station.SolarSystemID},
+                    {"@constellationID", station.ConstellationID},
+                    {"@regionID", station.RegionID}
+                }
+            );
+            Log.Information("[beyonce] Dock: Updated chrInformation for char {CharID}", charID);
+
             // Session change: enter station (reverse of ship.Undock)
             var delta = new Session();
             delta[Session.STATION_ID]       = (PyInteger)targetStation;
@@ -371,9 +405,97 @@ namespace EVESharp.Node.Services.Space
 
         public PyDataType StargateJump(ServiceCall call, PyInteger fromID, PyInteger toID)
         {
+            int charID = call.Session.CharacterID;
             int shipID = call.Session.ShipID ?? 0;
-            Log.Information("[beyonce] StargateJump: ship={ShipID}, from={FromID}, to={ToID}", shipID, fromID?.Value, toID?.Value);
+            int destGateID = (int)(toID?.Value ?? 0);
+
+            Log.Information("[beyonce] StargateJump: char={CharID}, ship={ShipID}, from={FromID}, to={ToID}", charID, shipID, fromID?.Value, destGateID);
+
+            if (destGateID == 0)
+                return new PyNone();
+
+            // Look up destination gate's solar system, position, constellation, and region
+            var destInfo = GetStargateDestinationInfo(destGateID);
+            if (destInfo == null)
+            {
+                Log.Warning("[beyonce] StargateJump: could not find destination info for gate {GateID}", destGateID);
+                return new PyNone();
+            }
+
+            Log.Information("[beyonce] StargateJump: destination system={SolarSystemID}, constellation={ConstellationID}, region={RegionID}, pos=({X:F0},{Y:F0},{Z:F0})",
+                destInfo.Value.SolarSystemID, destInfo.Value.ConstellationID, destInfo.Value.RegionID,
+                destInfo.Value.X, destInfo.Value.Y, destInfo.Value.Z);
+
+            // Unregister ship from current DestinyManager
+            mDestinyManager?.UnregisterEntity(shipID);
+
+            // Update ship position to near the destination gate
+            if (Items.TryGetItem(shipID, out ItemEntity shipEntity))
+            {
+                // Place ship 15km from the gate (offset along X to avoid overlap)
+                shipEntity.X = destInfo.Value.X + 15000;
+                shipEntity.Y = destInfo.Value.Y;
+                shipEntity.Z = destInfo.Value.Z;
+            }
+
+            // Session change: transition to new solar system
+            var delta = new Session();
+            delta[Session.STATION_ID]       = new PyNone();
+            delta[Session.LOCATION_ID]      = (PyInteger)destInfo.Value.SolarSystemID;
+            delta[Session.SOLAR_SYSTEM_ID]  = (PyInteger)destInfo.Value.SolarSystemID;
+            delta[Session.SOLAR_SYSTEM_ID2] = (PyInteger)destInfo.Value.SolarSystemID;
+            delta[Session.CONSTELLATION_ID] = (PyInteger)destInfo.Value.ConstellationID;
+            delta[Session.REGION_ID]        = (PyInteger)destInfo.Value.RegionID;
+
+            Log.Information("[beyonce] StargateJump: performing session update for char {CharID} -> system {SystemID}", charID, destInfo.Value.SolarSystemID);
+            SessionManager.PerformSessionUpdate(Session.CHAR_ID, charID, delta);
+            Log.Information("[beyonce] StargateJump: session update completed");
+
             return new PyNone();
+        }
+
+        private struct StargateDestination
+        {
+            public int SolarSystemID;
+            public double X, Y, Z;
+            public int ConstellationID;
+            public int RegionID;
+        }
+
+        private StargateDestination? GetStargateDestinationInfo(int gateID)
+        {
+            try
+            {
+                DbDataReader reader = Database.Select(
+                    "SELECT md.solarSystemID, md.x, md.y, md.z, ms.constellationID, ms.regionID " +
+                    "FROM mapDenormalize md " +
+                    "JOIN mapSolarSystems ms ON ms.solarSystemID = md.solarSystemID " +
+                    "WHERE md.itemID = @itemID",
+                    new Dictionary<string, object> { { "@itemID", gateID } }
+                );
+
+                using (reader)
+                {
+                    if (reader.Read())
+                    {
+                        return new StargateDestination
+                        {
+                            SolarSystemID   = reader.GetInt32(0),
+                            X               = reader.GetDouble(1),
+                            Y               = reader.GetDouble(2),
+                            Z               = reader.GetDouble(3),
+                            ConstellationID = reader.GetInt32(4),
+                            RegionID        = reader.GetInt32(5)
+                        };
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "[beyonce] Failed to get destination info for gate {GateID}: {Message}", gateID, ex.Message);
+            }
+
+            return null;
         }
 
         // =====================================================================
@@ -472,6 +594,21 @@ namespace EVESharp.Node.Services.Space
                 {
                     var slimDict = (PyDictionary)slim.Arguments;
                     slimDict["modules"] = new PyList();
+                }
+
+                // Stargates need destination gate IDs in 'jumps' for the right-click menu
+                int groupID = ent.Type?.Group?.ID ?? 0;
+                if (groupID == (int)GroupID.Stargate && mStargateJumps.TryGetValue(ent.ID, out var jumpDests))
+                {
+                    var slimDict = (PyDictionary)slim.Arguments;
+                    var jumpsList = new PyList();
+                    foreach (var jump in jumpDests)
+                        jumpsList.Add(new PyObjectData("util.KeyVal", new PyDictionary
+                        {
+                            ["locationID"]    = new PyInteger(jump.SolarSystemID),
+                            ["toCelestialID"] = new PyInteger(jump.GateID)
+                        }));
+                    slimDict["jumps"] = jumpsList;
                 }
 
                 slims.Add(slim);
@@ -716,10 +853,53 @@ namespace EVESharp.Node.Services.Space
                 }
 
                 Log.Information("[beyonce] Loaded {Count} celestials for system {SystemID}", count, solarSystemID);
+
+                // Load stargate jump destinations for this solar system
+                LoadStargateJumps(solarSystemID);
             }
             catch (Exception ex)
             {
                 Log.Error(ex, "[beyonce] Failed to load celestials for system {SystemID}: {Message}", solarSystemID, ex.Message);
+            }
+        }
+
+        private void LoadStargateJumps(int solarSystemID)
+        {
+            try
+            {
+                mStargateJumps.Clear();
+
+                DbDataReader reader = Database.Select(
+                    "SELECT mj.stargateID, mj.celestialID, md2.solarSystemID " +
+                    "FROM mapJumps mj " +
+                    "INNER JOIN mapDenormalize md ON md.itemID = mj.stargateID " +
+                    "INNER JOIN mapDenormalize md2 ON md2.itemID = mj.celestialID " +
+                    "WHERE md.solarSystemID = @solarSystemID AND md.groupID = 10",
+                    new Dictionary<string, object> { { "@solarSystemID", solarSystemID } }
+                );
+
+                using (reader)
+                {
+                    while (reader.Read())
+                    {
+                        int stargateID      = reader.GetInt32(0);
+                        int destGateID      = reader.GetInt32(1);
+                        int destSolarSystem = reader.GetInt32(2);
+
+                        if (!mStargateJumps.TryGetValue(stargateID, out var dests))
+                        {
+                            dests = new List<(int, int)>();
+                            mStargateJumps[stargateID] = dests;
+                        }
+                        dests.Add((destGateID, destSolarSystem));
+                    }
+                }
+
+                Log.Information("[beyonce] Loaded stargate jumps: {Count} gates with destinations in system {SystemID}", mStargateJumps.Count, solarSystemID);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "[beyonce] Failed to load stargate jumps for system {SystemID}: {Message}", solarSystemID, ex.Message);
             }
         }
 

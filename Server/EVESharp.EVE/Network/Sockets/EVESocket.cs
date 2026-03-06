@@ -181,6 +181,10 @@ public class EVESocket : IEVESocket
 
     public virtual void Send (PyDataType data)
     {
+        // do not send if the socket is already closed or disposed
+        if (this.IsClosed || this.IsDisposed)
+            return;
+
         // convert the data to bytes
         byte [] encodedPacket = Marshal.ToByteArray (data);
         // compress the packet if required
@@ -204,11 +208,14 @@ public class EVESocket : IEVESocket
             return;
 
         this.IsClosed = true;
-        
+
         this.Socket.Shutdown (SocketShutdown.Both);
         this.Socket.Disconnect (false);
         this.Socket.Close ();
-        
+
+        // fire connection lost so transports/sessions can clean up
+        this.ConnectionLost?.Invoke ();
+
         // clear all the callbacks
         this.DataReceived   = null;
         this.Exception      = null;

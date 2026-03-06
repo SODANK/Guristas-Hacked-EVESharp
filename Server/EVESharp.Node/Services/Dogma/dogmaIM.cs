@@ -86,6 +86,17 @@ public class dogmaIM : ClientBoundService
             ship.Attributes [AttributeTypes.shieldCharge] = new EVESharp.Database.Inventory.Attributes.Attribute (AttributeTypes.shieldCharge, shieldCap);
         }
 
+        // Ensure warp attributes are set. Without baseWarpSpeed the client's godma proxy
+        // calculates warp range as 0, causing "Out of warp range" for all targets.
+        if (!ship.Attributes.TryGetAttribute (AttributeTypes.baseWarpSpeed, out _))
+        {
+            ship.Attributes [AttributeTypes.baseWarpSpeed] = new EVESharp.Database.Inventory.Attributes.Attribute (AttributeTypes.baseWarpSpeed, 1.0);
+        }
+        if (!ship.Attributes.TryGetAttribute (AttributeTypes.warpSpeedMultiplier, out _))
+        {
+            ship.Attributes [AttributeTypes.warpSpeedMultiplier] = new EVESharp.Database.Inventory.Attributes.Attribute (AttributeTypes.warpSpeedMultiplier, 1.0);
+        }
+
         ItemInfo itemInfo = new ItemInfo ();
         itemInfo.AddRow (ship.ID, ship.GetEntityRow (), ship.GetEffects (), ship.Attributes, DateTime.UtcNow.ToFileTime ());
 

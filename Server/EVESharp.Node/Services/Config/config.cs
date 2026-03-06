@@ -56,6 +56,8 @@ public class config : Service
     // THESE PARAMETERS AREN'T REALLY USED ANYMORE, THIS FUNCTION IS USUALLY CALLED WITH LOCATIONID, 1
     public PyDataType GetMapObjects (ServiceCall call, PyInteger locationID, PyInteger ignored1)
     {
+        if (locationID == null)
+            return new PyNone();
         return DB.GetMapObjects (locationID);
     }
 
@@ -66,6 +68,8 @@ public class config : Service
         PyInteger       wantSystems, PyInteger wantItems,  PyInteger unknown
     )
     {
+        if (locationID == null)
+            return new PyNone();
         return DB.GetMapObjects (locationID);
     }
 

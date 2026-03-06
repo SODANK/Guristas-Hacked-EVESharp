@@ -24,7 +24,7 @@ public abstract class SessionManager : ISessionManager
     /// <param name="source">The session to register</param>
     public void RegisterSession(Session source)
     {
-        this.mSessions.TryAdd(source.UserID, source);
+        this.mSessions [source.UserID] = source;
     }
 
     /// <summary>
