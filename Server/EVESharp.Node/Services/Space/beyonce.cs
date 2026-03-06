@@ -118,7 +118,10 @@ namespace EVESharp.Node.Services.Space
             // ----------------------------------------------------------
             mBallpark = new Ballpark(mSolarSystemID, mOwnerID);
 
-            if (shipID != 0 && Items.TryGetItem(shipID, out ItemEntity shipEntity))
+            // Use LoadItem (cache + DB fallback) to guarantee the ship is loaded even if
+            // it was evicted from the cache (e.g. by dogmaIM.OnClientDisconnected or inventory unload).
+            ItemEntity shipEntity = shipID != 0 ? Items.LoadItem(shipID) : null;
+            if (shipEntity != null)
             {
                 Log.Information("[beyonce] Added ship {ShipID} at ({X:F0},{Y:F0},{Z:F0})", shipID, shipEntity.X, shipEntity.Y, shipEntity.Z);
                 mBallpark.AddEntity(shipEntity);
@@ -362,7 +365,9 @@ namespace EVESharp.Node.Services.Space
             mDestinyManager?.UnregisterEntity(shipID);
 
             // Move ship to the new station in DB (same pattern as /move GM command)
-            if (shipID != 0 && Items.TryGetItem(shipID, out ItemEntity shipEntity))
+            // Use LoadItem to guarantee the ship is loaded even if evicted from cache.
+            ItemEntity shipEntity = shipID != 0 ? Items.LoadItem(shipID) : null;
+            if (shipEntity != null)
             {
                 shipEntity.LocationID = targetStation;
                 shipEntity.Flag = Flags.Hangar;
@@ -392,7 +397,7 @@ namespace EVESharp.Node.Services.Space
             delta[Session.STATION_ID]       = (PyInteger)targetStation;
             delta[Session.LOCATION_ID]      = (PyInteger)targetStation;
             delta[Session.SOLAR_SYSTEM_ID]  = new PyNone();
-            delta[Session.SOLAR_SYSTEM_ID2] = new PyNone();
+            delta[Session.SOLAR_SYSTEM_ID2] = (PyInteger)station.SolarSystemID;
             delta[Session.CONSTELLATION_ID] = (PyInteger)station.ConstellationID;
             delta[Session.REGION_ID]        = (PyInteger)station.RegionID;
 
@@ -429,13 +434,19 @@ namespace EVESharp.Node.Services.Space
             // Unregister ship from current DestinyManager
             mDestinyManager?.UnregisterEntity(shipID);
 
-            // Update ship position to near the destination gate
-            if (Items.TryGetItem(shipID, out ItemEntity shipEntity))
+            // Update ship position to near the destination gate and persist
+            // Use LoadItem to guarantee the ship is loaded even if evicted from cache.
+            ItemEntity shipEntity = shipID != 0 ? Items.LoadItem(shipID) : null;
+            if (shipEntity != null)
             {
                 // Place ship 15km from the gate (offset along X to avoid overlap)
                 shipEntity.X = destInfo.Value.X + 15000;
                 shipEntity.Y = destInfo.Value.Y;
                 shipEntity.Z = destInfo.Value.Z;
+                shipEntity.LocationID = destInfo.Value.SolarSystemID;
+                shipEntity.Persist();
+                Log.Information("[beyonce] StargateJump: Ship {ShipID} persisted at ({X:F0},{Y:F0},{Z:F0}), locationID={LocationID}",
+                    shipID, shipEntity.X, shipEntity.Y, shipEntity.Z, destInfo.Value.SolarSystemID);
             }
 
             // Session change: transition to new solar system
@@ -593,7 +604,36 @@ namespace EVESharp.Node.Services.Space
                 if (isShip)
                 {
                     var slimDict = (PyDictionary)slim.Arguments;
-                    slimDict["modules"] = new PyList();
+                    var modulesList = new PyList();
+
+                    // Load the ship to get its fitted modules for 3D hardpoint rendering
+                    try
+                    {
+                        var ship = Items.LoadItem<Ship>(ent.ID);
+                        if (ship != null)
+                        {
+                            foreach (var (_, module) in ship.Items)
+                            {
+                                if (module.IsInModuleSlot() || module.IsInRigSlot())
+                                {
+                                    var modEntry = new PyTuple(2)
+                                    {
+                                        [0] = new PyInteger(module.Type.ID),
+                                        [1] = new PyInteger((int)module.Flag)
+                                    };
+                                    modulesList.Add(modEntry);
+                                }
+                            }
+
+                            Log.Information("[beyonce] Ship {ShipID} has {ModuleCount} fitted modules", ent.ID, modulesList.Count);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "[beyonce] Failed to load modules for ship {ShipID}: {Message}", ent.ID, ex.Message);
+                    }
+
+                    slimDict["modules"] = modulesList;
                 }
 
                 // Stargates need destination gate IDs in 'jumps' for the right-click menu
@@ -651,7 +691,8 @@ namespace EVESharp.Node.Services.Space
 
                 // If we have a BubbleEntity with live position, use it
                 double x, y, z;
-                if (mDestinyManager != null && mDestinyManager.TryGetEntity(ent.ID, out var bubbleEnt))
+                BubbleEntity bubbleEnt = null;
+                if (mDestinyManager != null && mDestinyManager.TryGetEntity(ent.ID, out bubbleEnt))
                 {
                     x = bubbleEnt.Position.X;
                     y = bubbleEnt.Position.Y;
@@ -682,7 +723,8 @@ namespace EVESharp.Node.Services.Space
                 {
                     ItemId   = ent.ID,
                     Mode     = mode,
-                    Radius   = isEgo ? 50.0 : (ent.Type?.Radius ?? 5000.0),
+                    Radius   = isEgo ? 50.0
+                               : (bubbleEnt?.Radius ?? ent.Type?.Radius ?? 5000.0),
                     Location = new Vector3 { X = x, Y = y, Z = z },
                     Flags    = flags
                 };
@@ -797,6 +839,18 @@ namespace EVESharp.Node.Services.Space
 
                 Log.Information("[beyonce] LoadCelestials: {TotalItems} total items found in solar system {SystemID}", allItems.Count, solarSystemID);
 
+                // Load per-item radii from mapDenormalize (planets, moons, etc. each have unique radii)
+                var celestialRadii = new Dictionary<int, double>();
+                DbDataReader radiusReader = Database.Select(
+                    "SELECT itemID, radius FROM mapDenormalize WHERE solarSystemID = @solarSystemID AND radius IS NOT NULL",
+                    new Dictionary<string, object> { { "@solarSystemID", solarSystemID } }
+                );
+                using (radiusReader)
+                {
+                    while (radiusReader.Read())
+                        celestialRadii[radiusReader.GetInt32(0)] = radiusReader.GetDouble(1);
+                }
+
                 int count = 0;
                 foreach (var kvp in allItems)
                 {
@@ -810,7 +864,9 @@ namespace EVESharp.Node.Services.Space
                     if (mBallpark.Entities.ContainsKey(ent.ID))
                         continue;
 
-                    double radius = ent.Type?.Radius ?? 5000.0;
+                    double radius = celestialRadii.TryGetValue(ent.ID, out double mdRadius)
+                        ? mdRadius
+                        : (ent.Type?.Radius ?? 5000.0);
                     int typeID = ent.Type?.ID ?? 0;
                     string groupName = ent.Type?.Group?.Name ?? "???";
 
@@ -916,7 +972,9 @@ namespace EVESharp.Node.Services.Space
             mBallpark = new Ballpark(solarSystemID, ownerID);
             mDestinyManager = SolarSystemDestinyMgr.GetOrCreate(solarSystemID);
 
-            if (shipID != 0 && Items.TryGetItem(shipID, out ItemEntity shipEntity))
+            // Use LoadItem to guarantee the ship is loaded even if evicted from cache.
+            ItemEntity shipEntity = shipID != 0 ? Items.LoadItem(shipID) : null;
+            if (shipEntity != null)
             {
                 mBallpark.AddEntity(shipEntity);
                 if (!mDestinyManager.TryGetEntity(shipID, out _))

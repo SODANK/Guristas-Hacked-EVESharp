@@ -277,6 +277,8 @@ public class BoundInventory : ClientBoundService
 
     private void MoveItemHere (ItemEntity item, Flags newFlag, Session session, int quantity = 0)
     {
+        Console.WriteLine ($"[BoundInventory] MoveItemHere: item={item.ID} type={item.Type.ID} flag={newFlag} invID={this.mInventory.ID} invType={this.mInventory.GetType ().Name} isShipModule={item is ShipModule}");
+
         // rig slots cannot be moved
         if (item.IsInRigSlot ())
             throw new CannotRemoveUpgradeManually ();
@@ -301,7 +303,16 @@ public class BoundInventory : ClientBoundService
             if (this.mInventory.Type.ID == (int) TypeID.Capsule)
                 throw new CantFitToCapsule ();
 
-            if (this.mInventory is Ship ship)
+            // mInventory may be an ItemInventoryByOwnerID wrapper around the actual Ship
+            // Try direct type check first, then fall back to loading the actual item from cache
+            Ship ship = this.mInventory as Ship;
+
+            if (ship == null && Items.TryGetItem (this.mInventory.ID, out ItemEntity shipEntity))
+                ship = shipEntity as Ship;
+
+            Console.WriteLine ($"[BoundInventory] AutoFit: ship={ship != null} shipID={this.mInventory.ID}");
+
+            if (ship != null)
             {
                 // determine where to put the item
                 if (item is ShipModule module)
@@ -317,6 +328,8 @@ public class BoundInventory : ClientBoundService
                     else
                         // this item cannot be fitted, move it to cargo, maybe throw a exception about not being able to fit it?
                         newFlag = Flags.Cargo;
+
+                    Console.WriteLine ($"[BoundInventory] AutoFit resolved to slot {newFlag}");
                 }
                 // TODO: HANDLE CHARGES!
                 else
@@ -358,9 +371,13 @@ public class BoundInventory : ClientBoundService
         // special situation, if the new location is a module slot ensure the item is a singleton (TODO: HANDLE CHARGES TOO)
         if (newFlag.IsModule ())
         {
+            Console.WriteLine ($"[BoundInventory] Fitting item {item.ID} (type={item.Type.ID}, isShipModule={item is ShipModule}) to slot {newFlag} on {this.mInventory.ID}");
+
             DogmaItems.FitInto (
                 item, this.mInventory.ID, this.mInventory.OwnerID, newFlag, session
             );
+
+            Console.WriteLine ($"[BoundInventory] Fit complete for item {item.ID}");
         }
         else
         {

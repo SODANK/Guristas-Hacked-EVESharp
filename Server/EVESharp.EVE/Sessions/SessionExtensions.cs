@@ -28,4 +28,19 @@ public static class SessionExtensions
 
         return session.StationID;
     }
+
+    /// <summary>
+    /// Checks session data to ensure the character is in space (has a solar system, not in a station)
+    /// </summary>
+    /// <returns>The SolarSystemID where the character is at</returns>
+    /// <exception cref="CustomError">Thrown when not in space</exception>
+    public static int EnsureCharacterIsInSpace (this Session session)
+    {
+        int? solarSystemID = session.SolarSystemID;
+
+        if (solarSystemID == null)
+            throw new CustomError ("You must be in space to do this");
+
+        return solarSystemID.Value;
+    }
 }

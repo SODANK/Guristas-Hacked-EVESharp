@@ -105,6 +105,11 @@ public class dogmaIM : ClientBoundService
             if (item.IsInModuleSlot () == false && item.IsInRigSlot () == false)
                 continue;
 
+            // ensure ItemEffects is initialized so effects list is populated
+            // and the online state is restored from the persisted isOnline attribute
+            if (item is ShipModule module)
+                EffectsManager.GetForItem (module, call.Session);
+
             itemInfo.AddRow (
                 item.ID,
                 item.GetEntityRow (),

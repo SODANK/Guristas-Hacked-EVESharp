@@ -216,10 +216,12 @@ public class ship : ClientBoundService
         Log.Information("[ship] Undock: system={SolarSystemID}, constellation={ConstellationID}, region={RegionID}", solarSystemID, constellationID, regionID);
 
         // ----------------------------
-        // 2. UPDATE SHIP POSITION
+        // 2. UPDATE SHIP POSITION & PERSIST
         // ----------------------------
-        // Set undock position using the station type's dock entry point + orientation push
-        if (Items.TryGetItem(shipID, out ItemEntity shipEntity))
+        // Use LoadItem (cache + DB fallback) to guarantee the ship is loaded even if
+        // it was evicted from the cache (e.g. by dogmaIM.OnClientDisconnected or inventory unload).
+        var shipEntity = Items.LoadItem(shipID);
+        if (shipEntity != null)
         {
             var stationType = station.StationType;
             double pushDistance = 500.0; // meters along dock orientation to clear the station hull
@@ -231,8 +233,11 @@ public class ship : ClientBoundService
             shipEntity.X = undockX;
             shipEntity.Y = undockY;
             shipEntity.Z = undockZ;
+            shipEntity.LocationID = solarSystemID;
+            shipEntity.Flag = Flags.None;
+            shipEntity.Persist();
 
-            Log.Information("[ship] Undock: Set ship position to ({X:F0}, {Y:F0}, {Z:F0}) [dock entry + orientation push]", undockX, undockY, undockZ);
+            Log.Information("[ship] Undock: Set ship position to ({X:F0}, {Y:F0}, {Z:F0}), locationID={LocationID}, persisted", undockX, undockY, undockZ, solarSystemID);
         }
 
         // ----------------------------

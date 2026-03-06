@@ -63,6 +63,14 @@ namespace EVESharp.Node.Services.Space
             return mEntities.TryGetValue(itemID, out entity);
         }
 
+        /// <summary>
+        /// Returns all registered entities. Used by GM commands like /unspawn.
+        /// </summary>
+        public IEnumerable<BubbleEntity> GetEntities()
+        {
+            return mEntities.Values;
+        }
+
         // =====================================================================
         //  COMMAND METHODS (called from beyonce service thread)
         //  These enqueue commands to be processed on the next tick.
